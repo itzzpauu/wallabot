@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-4"
+VERSION = "2026.10.21-5"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -1636,7 +1636,10 @@ def main():
     except OSError:
         print(f"⚠️ El puerto {PUERTO} está ocupado: ¿hay otro WallaBot abierto? Ciérralo con: pkill -f wallabot")
     print("WallaBot en marcha. Escríbele /start en Telegram.")
-    # Aviso de encendido: si estuvo apagado, dice cuánto tiempo
+    # Aviso de encendido: si se acaba de actualizar, lo confirma; si estuvo apagado, dice cuánto tiempo
+    if d.get("owner") and d.get("version") and d.get("version") != VERSION:
+        enviar(d["owner"], f"✅ <b>Listo.</b> WallaBot actualizado a la versión <b>{VERSION}</b> y funcionando.")
+    d["version"] = VERSION
     if d.get("owner"):
         lat = d.get("latido")
         if lat and time.time() - lat > 300:
