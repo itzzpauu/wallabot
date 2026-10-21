@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-8"
+VERSION = "2026.10.21-9"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -1042,6 +1042,9 @@ main{padding:16px;max-width:560px;margin:0 auto}
 .anuncio .pre{font-size:18px;font-weight:800;margin:3px 0}
 .anuncio .meta{font-size:12px;color:var(--suave);line-height:1.5}
 .anuncio .cho{font-size:12px;font-weight:600;color:var(--verde2)}
+.anuncio{cursor:pointer;flex-wrap:wrap}
+.comprar{flex-basis:100%;margin-top:8px;border:0;border-radius:10px;padding:12px;font-size:16px;font-weight:800;background:var(--verde);color:#fff}
+.comprar:active{background:var(--verde2)}
 .card{background:var(--tarjeta);border:1px solid var(--borde);border-radius:16px;padding:16px;margin-bottom:16px}
 h2{font-size:16px;margin:0 0 12px}
 .check{display:flex;gap:8px;align-items:center;color:var(--texto);font-size:15px}.check input{width:20px;height:20px;accent-color:var(--verde)}
@@ -1240,13 +1243,27 @@ function pintaFeed(){
  const L=FEED.map((x,i)=>[x,i]).filter(([x])=>(!fa||String(x.alerta_id)===fa)&&(!q||(x.titulo||'').toLowerCase().includes(q)))
   .sort((a,b)=>((b[0].visto_ts||0)-(a[0].visto_ts||0))||(a[1]-b[1])).map(a=>a[0]);
  $('cuenta').textContent=L.length+' anuncio'+(L.length===1?'':'s')+' · el más reciente arriba';
- $('feed').innerHTML=L.length?L.slice(0,300).map(x=>`<a class="anuncio" href="${esc(x.url)}" target="_blank" rel="noopener">
+ $('feed').innerHTML=L.length?L.slice(0,300).map(x=>`<div class="anuncio" onclick="abrirApp('${esc(x.url)}')">
   ${x.foto?`<img loading="lazy" src="${esc(x.foto)}" alt="">`:'<div class="sinfoto">🛍</div>'}
   <div class="cuerpo"><div class="tit">${esc(x.titulo||'')}</div>
   <div class="pre">${esc(x.precio||'')}</div>
   ${x.chollo?`<div class="cho">${esc(x.chollo)}</div>`:''}
   <div class="meta">${esc(x.origen||'')} · ${esc(x.ciudad||'')}<br>📩 Encontrado ${hace(null,x.visto_ts)}${x.vendedor_nombre?' · 👤 '+esc(x.vendedor_nombre):''}<br>🔔 ${esc(x.alerta||'')}</div>
-  </div></a>`).join(''):`<div class="vacio">${FEED.length?'Nada con este filtro':'Aquí verás todo lo que te envíe el bot, lo último arriba.'}</div>`;
+  <button class="comprar" onclick="event.stopPropagation();abrirApp('${esc(x.url)}')">🛒 VER ANUNCIO</button>
+  </div></div>`).join(''):`<div class="vacio">${FEED.length?'Nada con este filtro':'Aquí verás todo lo que te envíe el bot, lo último arriba.'}</div>`;
+}
+// Abre el anuncio DIRECTAMENTE en la app de Wallapop o Vinted (sin pasar por Chrome ni preguntar)
+function abrirApp(url){
+ try{
+  const u=new URL(url);let pkg=null;
+  if(/(^|\.)wallapop\.com$/.test(u.hostname))pkg='com.wallapop';
+  else if(/(^|\.)vinted\./.test(u.hostname))pkg='fr.vinted';
+  if(pkg&&/Android/i.test(navigator.userAgent)){
+   location.href='intent://'+u.host+u.pathname+u.search+'#Intent;scheme=https;package='+pkg+';S.browser_fallback_url='+encodeURIComponent(url)+';end';
+   return;
+  }
+ }catch(e){}
+ location.href=url;
 }
 function verEncontrados(id){tab('encontrados');$('fAlerta').value=String(id);$('fTexto').value='';pintaFeed()}
 async function borrarFeed(){
