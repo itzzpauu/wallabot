@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-2"
+VERSION = "2026.10.21-3"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -1456,10 +1456,12 @@ def notificar_movil(d, it, b):
             url = str(it.get("url") or "").replace("'", "%27")
             args = ["termux-notification", "--id", f"wallabot{NOTIF_N[0]}", "--group", "wallabot",
                     "--priority", "high", "--sound", "--vibrate", "200,100,200",
-                    "--title", f"🚨 {it.get('titulo', '')}"[:80],
+                    "--icon", "manage_search",
+                    "--title", f"WallaBot · {it.get('titulo', '')}"[:80],
                     "--content", f"💰 {it.get('precio', '')} · {it.get('origen', '')} · 🔔 {b.get('texto', '')}",
-                    "--action", f"termux-open-url 'http://localhost:{PUERTO}/?tab=encontrados'",
-                    "--button1", "Ver anuncio", "--button1-action", f"termux-open-url '{url}'"]
+                    "--action", f"termux-open-url '{url}'",
+                    "--button1", "Ver anuncio", "--button1-action", f"termux-open-url '{url}'",
+                    "--button2", "Encontrados", "--button2-action", f"termux-open-url 'http://localhost:{PUERTO}/?tab=encontrados'"]
             if it.get("foto"):
                 ruta = os.path.join(DATOS_DIR, f"foto{NOTIF_N[0]}.jpg")
                 try:
