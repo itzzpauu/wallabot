@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-3"
+VERSION = "2026.10.21-4"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -100,7 +100,7 @@ Cada aviso trae botones: <i>Ver anuncio · Pausar alerta · Silenciar vendedor</
 
 # ---------------- Datos ----------------
 def cargar():
-    base = {"owner": None, "lat": 41.3874, "lon": 2.1686, "zona": "Barcelona", "intervalo": 60, "max_edad": 0, "feed": [], "notif_movil": True,
+    base = {"owner": None, "lat": 41.3874, "lon": 2.1686, "zona": "Barcelona", "intervalo": 20, "max_edad": 0, "feed": [], "notif_movil": True,
             "pausa": False, "busquedas": [], "offset": 0, "next_id": 1, "silenciados": []}
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, encoding="utf-8") as f:
@@ -119,6 +119,8 @@ def cargar():
                     b.pop(k, None)
         if guardado.get("max_edad") in (2, 15):   # versiones anteriores: ahora sin límite
             guardado["max_edad"] = 0
+        if guardado.get("intervalo", 60) >= 60 and not guardado.get("rapido"):   # pasar a 20 s una vez
+            guardado.update(intervalo=20, rapido=True)
         base.update(guardado)
     return base
 
@@ -532,9 +534,13 @@ def buscar_vinted(b, dom):
     return res
 
 # ---------------- Búsqueda combinada ----------------
-def buscar(b, d):
-    """Busca en todas las fuentes de la alerta. None solo si todas fallan."""
-    f = b.get("fuentes") or FUENTES_DEFECTO
+def buscar(b, d, solo=None):
+    """Busca en las fuentes de la alerta (solo='walla' o 'vinted' para una sola). None si todas fallan."""
+    f = dict(b.get("fuentes") or FUENTES_DEFECTO)
+    if solo == "walla":
+        f["vinted"] = []
+    elif solo == "vinted":
+        f["wallapop"] = f["wallapop_it"] = False
     grupos, alguna_ok = [], False
     if f.get("wallapop"):
         r = buscar_wallapop(b, d["lat"], d["lon"])
@@ -602,6 +608,12 @@ def filtrar(b, items, silenciados):
 def solo_nuevos(d):
     """Corta los avisos pendientes y marca como visto todo lo que hay ahora."""
     d["cortar"] = True
+    d["corte_ts"] = time.time()
+    try:
+        while True:
+            COLA.get_nowait()
+    except Exception:
+        pass
     with LOCK:
         for b in d["busquedas"]:
             b["inicial"] = True
@@ -958,7 +970,7 @@ def manejar(d, msg):
 
     elif cmd == "/intervalo":
         try:
-            d["intervalo"] = max(30, int(arg)); enviar(chat, f"⏱ Revisaré cada {d['intervalo']} s.")
+            d["intervalo"] = max(15, int(arg)); enviar(chat, f"⏱ Revisaré Wallapop cada {d['intervalo']} s (Vinted cada minuto).")
         except ValueError:
             enviar(chat, "Ej: /intervalo 60")
 
@@ -1092,6 +1104,7 @@ input[type=range]{width:100%;accent-color:var(--verde)}
 <button class="btn sec" id="btnpausa" onclick="pausaGeneral()"></button>
 <label>Revisar cada</label>
 <select id="intervalo" onchange="ajustes({intervalo:+this.value})">
+ <option value="15">15 segundos (máxima velocidad)</option><option value="20">20 segundos (recomendado)</option>
  <option value="30">30 segundos</option><option value="60">1 minuto</option>
  <option value="120">2 minutos</option><option value="300">5 minutos</option>
 </select>
@@ -1406,7 +1419,7 @@ def crear_panel(d):
             if ruta == "/api/ajustes":
                 with LOCK:
                     if "intervalo" in body:
-                        d["intervalo"] = max(30, int(body["intervalo"]))
+                        d["intervalo"] = max(15, int(body["intervalo"]))
                     if "max_edad" in body:
                         d["max_edad"] = max(0, float(body["max_edad"]))
                     if "notif_movil" in body:
@@ -1477,48 +1490,69 @@ def notificar_movil(d, it, b):
     threading.Thread(target=tarea, daemon=True).start()
 
 MAX_TANDA = 15   # máximo de avisos seguidos por alerta en una revisión
+import queue
+COLA = queue.Queue()
 
-def revisar(d):
-    d["cortar"] = False
-    sil = set(d["silenciados"])
-    with LOCK:
-        lista = list(d["busquedas"])
-    for b in lista:
-        if b.get("pausada") or b.get("inicial"):
-            continue
-        res = buscar(b, d)
-        if res is None:
-            continue
-        with LOCK:
-            enviados = d.setdefault("enviados", [])
-            ya = set(b.get("vistos", [])) | set(enviados)
-        nuevos = [it for it in res if it["id"] not in ya]
-        # Por defecto (0) se avisa de todo lo nuevo que se detecta, como WallaHunt.
-        # Si en Ajustes se pone un límite, se ignoran los publicados hace más tiempo.
-        if float(d.get("max_edad", 0)) > 0:
-            limite = max(float(d["max_edad"]), d["intervalo"] / 60 + 1)
-            nuevos = [it for it in nuevos if (e := edad_min(it)) is None or e <= limite]
-        # Todos van al historial de la web; a Telegram como mucho los MAX_TANDA más recientes
-        for it in reversed(nuevos):
-            add_feed(d, it, b)
-        a_enviar = nuevos[:MAX_TANDA]
-        if len(nuevos) > MAX_TANDA:
-            enviar(d["owner"], f"📦 <b>{len(nuevos)} anuncios nuevos</b> para «{html.escape(b['texto'])}». "
-                               f"Te mando los {MAX_TANDA} más recientes; el resto está en la web, en 📰 Encontrados.")
-        for it in reversed(a_enviar):          # del más antiguo al más nuevo
-            if d.get("cortar") or d.get("pausa") or b.get("pausada") or b not in d["busquedas"]:
-                break
+def remitente(d):
+    """Envía los avisos en cuanto se detectan, sin esperar a que acabe la búsqueda."""
+    while True:
+        it, b, t = COLA.get()
+        try:
+            if t < d.get("corte_ts", 0) or d.get("pausa") or b.get("pausada") or b not in d["busquedas"]:
+                continue
             if it.get("vendedor") and it["vendedor"] in d["silenciados"]:
                 continue
             enviar_anuncio(d["owner"], it, b)
             notificar_movil(d, it, b)
-            time.sleep(0.5)
-        with LOCK:
-            # Recuerda TODO lo que aparece ahora (no solo lo nuevo) y lo enviado, para no repetir nunca
-            b["vistos"] = list(dict.fromkeys([it["id"] for it in res] + b.get("vistos", [])))[:MAX_VISTOS]
-            d["enviados"] = list(dict.fromkeys([it["id"] for it in nuevos] + d["enviados"]))[:MAX_ENVIADOS]
-        guardar(d)
-        time.sleep(2)                         # no saturar Wallapop
+            time.sleep(0.25)
+        except Exception as e:
+            print("Error enviando:", e)
+
+def revisar_alerta(d, b, solo):
+    if b.get("pausada") or b.get("inicial"):
+        return
+    res = buscar(b, d, solo)
+    if res is None or b.get("inicial"):
+        return
+    with LOCK:
+        ya = set(b.get("vistos", [])) | set(d.setdefault("enviados", []))
+        nuevos = [it for it in res if it["id"] not in ya]
+        # Recuerda TODO lo que aparece y lo que se va a enviar: nunca se repite
+        b["vistos"] = list(dict.fromkeys([it["id"] for it in res] + b.get("vistos", [])))[:MAX_VISTOS]
+        d["enviados"] = list(dict.fromkeys([it["id"] for it in nuevos] + d["enviados"]))[:MAX_ENVIADOS]
+    if float(d.get("max_edad", 0)) > 0:
+        limite = max(float(d["max_edad"]), d["intervalo"] / 60 + 1)
+        nuevos = [it for it in nuevos if (e := edad_min(it)) is None or e <= limite]
+    if not nuevos:
+        return
+    for it in reversed(nuevos):
+        add_feed(d, it, b)
+    if len(nuevos) > MAX_TANDA:
+        enviar(d["owner"], f"📦 <b>{len(nuevos)} anuncios nuevos</b> para «{html.escape(b['texto'])}». "
+                           f"Te mando los {MAX_TANDA} más recientes; el resto está en la web, en 📰 Encontrados.")
+    ahora = time.time()
+    for it in reversed(nuevos[:MAX_TANDA]):       # del más antiguo al más nuevo
+        COLA.put((it, b, ahora))
+
+def revisar(d, solo=None, hilos=4):
+    with LOCK:
+        lista = [b for b in d["busquedas"] if not b.get("pausada") and not b.get("inicial")]
+    if not lista:
+        return
+    with ThreadPoolExecutor(max_workers=hilos) as ex:
+        list(ex.map(lambda b: revisar_alerta(d, b, solo), lista))
+    guardar(d)
+
+def bucle(d, solo, cada, hilos):
+    """Un ritmo de revisión: Wallapop rápido, Vinted más tranquilo."""
+    while True:
+        t0 = time.time()
+        try:
+            if d.get("owner") and not d.get("pausa"):
+                revisar(d, solo, hilos)
+        except Exception as e:
+            print(f"Error revisando {solo}:", e)
+        time.sleep(max(3, cada() - (time.time() - t0)))
 
 # ---------------- Actualización automática desde GitHub ----------------
 def _version_de(src):
@@ -1634,16 +1668,12 @@ def main():
     threading.Thread(target=atender_telegram, daemon=True).start()
     threading.Thread(target=vigilar_actualizaciones, args=(d,), daemon=True).start()
 
-    ultima = 0
+    threading.Thread(target=remitente, args=(d,), daemon=True).start()
+    threading.Thread(target=bucle, args=(d, "walla", lambda: d["intervalo"], 6), daemon=True).start()
+    threading.Thread(target=bucle, args=(d, "vinted", lambda: max(60, d["intervalo"]), 2), daemon=True).start()
     while True:
         try:
-            time.sleep(1)
-            if d["owner"] and not d["pausa"] and time.time() - ultima >= d["intervalo"]:
-                ultima = time.time()
-                try:
-                    revisar(d)
-                except Exception as e:
-                    print("Error revisando:", e)
+            time.sleep(15)
             d["latido"] = time.time()
             guardar(d)
         except Exception as e:          # nunca se cae por un error puntual
