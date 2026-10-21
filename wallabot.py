@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-9"
+VERSION = "2026.10.21-10"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -210,35 +210,48 @@ def add_feed(d, it, b):
         feed.insert(0, t)
         del feed[MAX_FEED:]
 
-def enviar_anuncio(chat, item, b, titulo="🚨 <b>¡Nuevo producto encontrado!</b>"):
-    cho = chollometro(item)
-    plataforma = item.get("origen", "Wallapop").replace("🟢 ", "").replace("🟣 ", "")
+def _chollo_corto(item):
+    p, med = item.get("precio_num"), item.get("mediana")
+    if not p or not med:
+        return ""
+    r = p / med
+    if r <= 0.7:  return f"🔥 CHOLLAZO -{int((1 - r) * 100)}%"
+    if r <= 0.9:  return "✅ Buen precio"
+    if r >= 1.15: return "💸 Caro"
+    return ""
+
+def enviar_anuncio(chat, item, b, titulo=None):
+    """Aviso compacto: la foto manda; plataforma y precio en la primera línea."""
+    origen = item.get("origen", "🟢 Wallapop")
+    cabecera = origen.replace("Wallapop", "WALLAPOP").replace("Vinted", "VINTED")
+    if titulo:                                   # /probar, /buscar
+        cabecera = f"{titulo} · {cabecera}"
+    precio = f"💶 <b>{html.escape(str(item['precio']))}</b>"
+    if item.get("proteccion"):
+        precio += f" ({html.escape(item['proteccion'])} c/protección)"
     vend = ""
     if item.get("vendedor_nombre"):
         n = html.escape(item["vendedor_nombre"])
         vend = f'<a href="{item["perfil_url"]}">{n}</a>' if item.get("perfil_url") else n
-    det = detectado_txt(item)
-    lineas = [f"{titulo} · {plataforma}", "",
-              f"📝 <b>{html.escape(item['titulo'])}</b>",
-              f"💰 Precio: <b>{item['precio']}</b>"]
-    if item.get("proteccion"): lineas.append(f"🛡 Con protección: {item['proteccion']}")
-    if item.get("envio"):      lineas.append(f"📦 Envío: {item['envio']}")
-    if cho:                    lineas.append(cho)
-    lineas.append(f"📍 {html.escape(item['ciudad'] or '—')}")
-    if det:                    lineas.append(f"⏱ Detectado: {det}")
-    if vend:                   lineas += ["", f"👤 Vendedor: {vend}"]
-    lineas += ["", f"🏷 Alerta: {alerta_corta(b)}", "", f"👉 {html.escape(item['url'])}"]
+    e = edad_min(item)
+    extra = [x for x in (
+        _chollo_corto(item),
+        "📦 Envío" if item.get("envio") == "Disponible" else ("🤝 En mano" if item.get("envio") else ""),
+        f"⏱ {int(e)} min" if e is not None else "",
+    ) if x]
+    lineas = [f"{cabecera} · {precio}",
+              f"<b>{html.escape(item['titulo'])}</b>",
+              f"📍 {html.escape(item['ciudad'] or '—')}" + (" · " + " · ".join(extra) if extra else ""),
+              (f"👤 {vend} · " if vend else "") + f"🔔 {alerta_corta(b)}",
+              f"👉 {html.escape(item['url'])}"]
     cap = "\n".join(lineas)
-    filas = []
+    fila = []
     if b.get("id"):
-        filas.append([{"text": "✏️ Editar alerta", "callback_data": f"e:{b['id']}"}])
-    fila2 = []
-    if b.get("id"):
-        fila2.append({"text": "⏸ Pausar alerta", "callback_data": f"p:{b['id']}"})
-    if item["vendedor"]:
-        fila2.append({"text": "🔇 Silenciar vendedor", "callback_data": f"s:{item['vendedor']}"[:64]})
-    if fila2:
-        filas.append(fila2)
+        fila.append({"text": "✏️ Editar", "callback_data": f"e:{b['id']}"})
+        fila.append({"text": "⏸ Pausar", "callback_data": f"p:{b['id']}"})
+    if item.get("vendedor"):
+        fila.append({"text": "🔇 Silenciar", "callback_data": f"s:{item['vendedor']}"[:64]})
+    filas = [fila] if fila else []
     filas.append([{"text": "👀 VER ANUNCIO", "url": item["url"]}])
     teclado = {"inline_keyboard": filas}
     if item["foto"]:
