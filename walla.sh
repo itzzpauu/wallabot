@@ -1,10 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # WallaBot: lo mantiene SIEMPRE encendido (si se cierra, vuelve a arrancar a los 5 s).
+# El código viene de GitHub y se actualiza solo; ya no se usan archivos de Descargas.
 for p in $(pgrep -f "walla.sh"); do [ "$p" != "$$" ] && kill "$p" 2>/dev/null; done
 pkill -f wallabot.py
-f=$(ls -t ~/downloads/wallabot* ~/storage/downloads/wallabot* 2>/dev/null | grep -v -e '\.json' -e '\.txt' -e '\.log' | head -1)
-if [ -n "$f" ]; then cp "$f" ~/wallabot.py && rm -f "$f" && echo "✅ Actualizado desde Descargas"; fi
-[ -f ~/wallabot.py ] || curl -fsSL https://raw.githubusercontent.com/itzzpauu/wallabot/main/wallabot.py -o ~/wallabot.py
+rm -f ~/downloads/wallabot*.py* ~/storage/downloads/wallabot*.py* 2>/dev/null
+if ! grep -q '^VERSION = ' ~/wallabot.py 2>/dev/null; then
+  curl -fsSL https://raw.githubusercontent.com/itzzpauu/wallabot/main/wallabot.py -o ~/wallabot.py && echo "✅ Bot descargado de GitHub"
+fi
 termux-wake-lock 2>/dev/null
 while true; do
   python ~/wallabot.py

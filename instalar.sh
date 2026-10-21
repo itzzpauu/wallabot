@@ -5,6 +5,7 @@ echo "📦 Instalando WallaBot..."
 pkg install -y python termux-api curl >/dev/null 2>&1
 pip install -q requests >/dev/null 2>&1
 URL=https://raw.githubusercontent.com/itzzpauu/wallabot/main
+rm -f ~/downloads/wallabot*.py* ~/storage/downloads/wallabot*.py* 2>/dev/null
 curl -fsSL "$URL/wallabot.py" -o ~/wallabot.py || { echo "❌ No pude descargar el bot. ¿Hay internet?"; exit 1; }
 curl -fsSL "$URL/walla.sh" -o ~/walla.sh
 grep -q "alias walla=" ~/.bashrc 2>/dev/null || echo "alias walla='bash ~/walla.sh'" >> ~/.bashrc
