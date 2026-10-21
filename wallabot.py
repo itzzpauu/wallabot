@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-5"
+VERSION = "2026.10.21-6"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -687,6 +687,7 @@ def describir(b):
     if b.get("max") is not None: s += f" · hasta {b['max']:g}€"
     if b.get("excluir"): s += f" · sin: {html.escape(', '.join(b['excluir']))}"
     if b.get("exactas"): s += " · 🎯 palabras exactas"
+    if b.get("prioridad"): s += " · ⚡ prioritaria"
     return s + " · " + donde_txt(b)
 
 def donde_txt(b):
@@ -716,6 +717,7 @@ def menu_alerta(chat, b, msg_id=None):
            f"💶 Precio máx.: {('%g €' % b['max']) if b.get('max') is not None else 'sin límite'}\n"
            f"🚫 Excluir: {html.escape(', '.join(b.get('excluir') or [])) or '—'}\n"
            f"🎯 Palabras exactas: {'Sí' if b.get('exactas') else 'No'}\n"
+           f"⚡ Prioritaria (cada {PRIORIDAD_CADA} s): {'Sí' if b.get('prioridad') else 'No'}\n"
            f"Estado: {'⏸ pausada' if b.get('pausada') else '▶️ activa'}\n\n¿Qué quieres cambiar?")
     i = b["id"]
     teclado = {"inline_keyboard": [
@@ -723,6 +725,7 @@ def menu_alerta(chat, b, msg_id=None):
         [{"text": "💶 Precio mín.", "callback_data": f"ec:{i}|min"}, {"text": "💶 Precio máx.", "callback_data": f"ec:{i}|max"}],
         [{"text": "🚫 Excluir palabras", "callback_data": f"ec:{i}|excluir"},
          {"text": f"🎯 Exactas: {'Sí ✅' if b.get('exactas') else 'No'}", "callback_data": f"ec:{i}|exactas"}],
+        [{"text": f"⚡ Prioritaria: {'Sí ✅' if b.get('prioridad') else 'No'}", "callback_data": f"ec:{i}|prioridad"}],
         [{"text": "▶️ Activar" if b.get("pausada") else "⏸ Pausar", "callback_data": f"ec:{i}|pausa"},
          {"text": "🗑 Borrar", "callback_data": f"ec:{i}|borrar"}],
     ]}
@@ -827,6 +830,10 @@ def manejar_boton(d, cq):
             enviar(chat, PREGUNTAS[campo] + "\n\nO escribe <b>cancelar</b>.")
         elif campo == "exactas":
             aplicar_edicion(d, b, "exactas", "")
+            menu_alerta(chat, b, msg_id)
+        elif campo == "prioridad":
+            b["prioridad"] = not b.get("prioridad")
+            guardar(d)
             menu_alerta(chat, b, msg_id)
         elif campo == "pausa":
             b["pausada"] = not b.get("pausada")
@@ -1087,6 +1094,7 @@ input[type=range]{width:100%;accent-color:var(--verde)}
 </div>
 <label>No quiero anuncios con estas palabras (separadas por comas)</label>
 <input type="text" id="excluir" placeholder="Ej: juego, funda, roto">
+<label class="check" style="margin-top:14px"><input type="checkbox" id="prioridad"> ⚡ Prioritaria: revisar cada 8 segundos (para lo que más te importa)</label>
 <label class="check" style="margin-top:14px"><input type="checkbox" id="exactas"> 🎯 Palabras exactas: el título debe decir <b>todas</b> las palabras que busco</label>
 <p style="font-size:12px;color:var(--suave);margin:10px 0 0">Busca en Wallapop 🇪🇸🇮🇹 y Vinted en todos los países.</p>
 <button class="btn" id="btnCrear" onclick="crear()">Crear alerta</button>
@@ -1141,6 +1149,7 @@ async function cargar(){
   if(b.min!=null)ch.push('desde '+b.min+' €');
   if(b.max!=null)ch.push('hasta '+b.max+' €');
   if(b.exactas)ch.push('🎯 palabras exactas');
+  if(b.prioridad)ch.unshift('⚡ prioritaria');
   (b.excluir||[]).filter(x=>x.trim()).forEach(x=>ch.push('sin '+x.trim()));
   if(b.pausada)ch.unshift('⏸ pausada');
   return `<div class="alerta ${b.pausada?'off':''}"><b>${esc(b.texto)}</b>
@@ -1172,7 +1181,7 @@ async function crear(){
  const mx=$('max').value, mn=$('min').value;
  toast(EDIT?'Guardando…':'Creando alerta…');
  const r=await post(EDIT?'/api/editar':'/api/crear',{id:EDIT,texto,min:mn===''?null:+mn,max:mx===''?null:+mx,
-   exactas:$('exactas').checked,
+   exactas:$('exactas').checked,prioridad:$('prioridad').checked,
    excluir:$('excluir').value.split(',').map(s=>s.trim()).filter(Boolean)});
  toast(r.msg);
  if(r.ok){cancelarEdicion();await cargar();
@@ -1183,12 +1192,12 @@ function editar(id){
  const b=E.busquedas.find(x=>x.id===id);if(!b)return;
  EDIT=id;
  $('texto').value=b.texto;$('min').value=b.min??'';$('max').value=b.max??'';
- $('excluir').value=(b.excluir||[]).join(', ');$('exactas').checked=!!b.exactas;
+ $('excluir').value=(b.excluir||[]).join(', ');$('exactas').checked=!!b.exactas;$('prioridad').checked=!!b.prioridad;
  $('titForm').textContent='✏️ Editar alerta';$('btnCrear').textContent='Guardar cambios';$('btnCancelar').hidden=false;
  $('titForm').scrollIntoView({behavior:'smooth'});
 }
 function cancelarEdicion(){
- EDIT=null;['texto','min','max','excluir'].forEach(i=>$(i).value='');$('exactas').checked=false;
+ EDIT=null;['texto','min','max','excluir'].forEach(i=>$(i).value='');$('exactas').checked=false;$('prioridad').checked=false;
  $('titForm').textContent='➕ Nueva alerta';$('btnCrear').textContent='Crear alerta';$('btnCancelar').hidden=true;
 }
 async function accion(id,a){const r=await post('/api/'+a,{id});toast(r.msg);cargar()}
@@ -1279,7 +1288,7 @@ def crear_panel(d):
                                 "silenciados": len(d["silenciados"]),
                                 "lsil": [{"id": v, "nombre": nombre_vendedor(d, v)} for v in d["silenciados"]],
                                 "paises": [{"dom": x[0], "flag": x[1], "pais": x[2]} for x in VINTED_PAISES],
-                                "busquedas": [dict({k: b.get(k) for k in ("id", "texto", "min", "max", "km", "zona", "lat", "lon", "excluir", "pausada", "fuentes", "exactas")},
+                                "busquedas": [dict({k: b.get(k) for k in ("id", "texto", "min", "max", "km", "zona", "lat", "lon", "excluir", "pausada", "fuentes", "exactas", "prioridad")},
                                                    donde=donde_txt(b))
                                               for b in d["busquedas"]]})
                 return
@@ -1343,6 +1352,7 @@ def crear_panel(d):
                 b = {"texto": texto, "min": num(body.get("min")), "max": num(body.get("max")), "km": None,
                      "excluir": [str(x) for x in body.get("excluir") or []],
                      "exactas": bool(body.get("exactas")),
+                     "prioridad": bool(body.get("prioridad")),
                      "fuentes": json.loads(json.dumps(FUENTES_DEFECTO))}
                 if ruta == "/api/editar":
                     vieja = alerta()
@@ -1534,22 +1544,25 @@ def revisar_alerta(d, b, solo):
     for it in reversed(nuevos[:MAX_TANDA]):       # del más antiguo al más nuevo
         COLA.put((it, b, ahora))
 
-def revisar(d, solo=None, hilos=4):
+PRIORIDAD_CADA = 8   # segundos entre revisiones de las alertas ⚡ prioritarias (Wallapop)
+
+def revisar(d, solo=None, hilos=4, solo_prioritarias=False):
     with LOCK:
-        lista = [b for b in d["busquedas"] if not b.get("pausada") and not b.get("inicial")]
+        lista = [b for b in d["busquedas"] if not b.get("pausada") and not b.get("inicial")
+                 and (b.get("prioridad") or not solo_prioritarias)]
     if not lista:
         return
     with ThreadPoolExecutor(max_workers=hilos) as ex:
         list(ex.map(lambda b: revisar_alerta(d, b, solo), lista))
     guardar(d)
 
-def bucle(d, solo, cada, hilos):
-    """Un ritmo de revisión: Wallapop rápido, Vinted más tranquilo."""
+def bucle(d, solo, cada, hilos, solo_prioritarias=False):
+    """Un ritmo de revisión: ⚡ prioritarias muy rápido, Wallapop rápido, Vinted más tranquilo."""
     while True:
         t0 = time.time()
         try:
             if d.get("owner") and not d.get("pausa"):
-                revisar(d, solo, hilos)
+                revisar(d, solo, hilos, solo_prioritarias)
         except Exception as e:
             print(f"Error revisando {solo}:", e)
         time.sleep(max(3, cada() - (time.time() - t0)))
@@ -1673,6 +1686,7 @@ def main():
 
     threading.Thread(target=remitente, args=(d,), daemon=True).start()
     threading.Thread(target=bucle, args=(d, "walla", lambda: d["intervalo"], 6), daemon=True).start()
+    threading.Thread(target=bucle, args=(d, "walla", lambda: PRIORIDAD_CADA, 3, True), daemon=True).start()
     threading.Thread(target=bucle, args=(d, "vinted", lambda: max(60, d["intervalo"]), 2), daemon=True).start()
     while True:
         try:
