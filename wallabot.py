@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-6"
+VERSION = "2026.10.21-8"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -227,9 +227,11 @@ def enviar_anuncio(chat, item, b, titulo="🚨 <b>¡Nuevo producto encontrado!</
     lineas.append(f"📍 {html.escape(item['ciudad'] or '—')}")
     if det:                    lineas.append(f"⏱ Detectado: {det}")
     if vend:                   lineas += ["", f"👤 Vendedor: {vend}"]
-    lineas += ["", f"🏷 Alerta: {alerta_corta(b)}", "", f'🔗 <a href="{item["url"]}">Ver producto</a>']
+    lineas += ["", f"🏷 Alerta: {alerta_corta(b)}", "", f"👉 {html.escape(item['url'])}"]
     cap = "\n".join(lineas)
-    filas = [[{"text": "👀 Ver anuncio", "url": item["url"]}]]
+    filas = []
+    if b.get("id"):
+        filas.append([{"text": "✏️ Editar alerta", "callback_data": f"e:{b['id']}"}])
     fila2 = []
     if b.get("id"):
         fila2.append({"text": "⏸ Pausar alerta", "callback_data": f"p:{b['id']}"})
@@ -237,8 +239,7 @@ def enviar_anuncio(chat, item, b, titulo="🚨 <b>¡Nuevo producto encontrado!</
         fila2.append({"text": "🔇 Silenciar vendedor", "callback_data": f"s:{item['vendedor']}"[:64]})
     if fila2:
         filas.append(fila2)
-    if b.get("id"):
-        filas.append([{"text": "✏️ Editar alerta", "callback_data": f"e:{b['id']}"}])
+    filas.append([{"text": "👀 VER ANUNCIO", "url": item["url"]}])
     teclado = {"inline_keyboard": filas}
     if item["foto"]:
         r = tg("sendPhoto", chat_id=chat, photo=item["foto"], caption=cap,
@@ -560,10 +561,15 @@ def buscar(b, d, solo=None):
         return None
     sil = set(d.get("silenciados", []))
     res, ids = [], set()
+    sin_precio = dict(b, min=None, max=None)
     for g in grupos:
-        filtrados = filtrar(b, g, sil)
-        precios = [i["precio_num"] for i in filtrados if i["precio_num"]]
+        base = filtrar(sin_precio, g, sil)
+        precios = [i["precio_num"] for i in base if i["precio_num"]]
         med = statistics.median(precios) if len(precios) >= 5 else None
+        filtrados = filtrar(b, base, sil)
+        if b.get("solo_chollos") and med:
+            # chollo = al menos un 10 % por debajo del precio típico de esa búsqueda
+            filtrados = [i for i in filtrados if i["precio_num"] is not None and i["precio_num"] <= med * 0.9]
         for i in filtrados:
             if i["id"] in ids:          # el mismo anuncio de Vinted sale en varios países
                 continue
@@ -688,6 +694,7 @@ def describir(b):
     if b.get("excluir"): s += f" · sin: {html.escape(', '.join(b['excluir']))}"
     if b.get("exactas"): s += " · 🎯 palabras exactas"
     if b.get("prioridad"): s += " · ⚡ prioritaria"
+    if b.get("solo_chollos"): s += " · 💰 solo chollos"
     return s + " · " + donde_txt(b)
 
 def donde_txt(b):
@@ -718,6 +725,7 @@ def menu_alerta(chat, b, msg_id=None):
            f"🚫 Excluir: {html.escape(', '.join(b.get('excluir') or [])) or '—'}\n"
            f"🎯 Palabras exactas: {'Sí' if b.get('exactas') else 'No'}\n"
            f"⚡ Prioritaria (cada {PRIORIDAD_CADA} s): {'Sí' if b.get('prioridad') else 'No'}\n"
+           f"💰 Solo chollos: {'Sí' if b.get('solo_chollos') else 'No'}\n"
            f"Estado: {'⏸ pausada' if b.get('pausada') else '▶️ activa'}\n\n¿Qué quieres cambiar?")
     i = b["id"]
     teclado = {"inline_keyboard": [
@@ -725,7 +733,8 @@ def menu_alerta(chat, b, msg_id=None):
         [{"text": "💶 Precio mín.", "callback_data": f"ec:{i}|min"}, {"text": "💶 Precio máx.", "callback_data": f"ec:{i}|max"}],
         [{"text": "🚫 Excluir palabras", "callback_data": f"ec:{i}|excluir"},
          {"text": f"🎯 Exactas: {'Sí ✅' if b.get('exactas') else 'No'}", "callback_data": f"ec:{i}|exactas"}],
-        [{"text": f"⚡ Prioritaria: {'Sí ✅' if b.get('prioridad') else 'No'}", "callback_data": f"ec:{i}|prioridad"}],
+        [{"text": f"⚡ Prioritaria: {'Sí ✅' if b.get('prioridad') else 'No'}", "callback_data": f"ec:{i}|prioridad"},
+         {"text": f"💰 Solo chollos: {'Sí ✅' if b.get('solo_chollos') else 'No'}", "callback_data": f"ec:{i}|solo_chollos"}],
         [{"text": "▶️ Activar" if b.get("pausada") else "⏸ Pausar", "callback_data": f"ec:{i}|pausa"},
          {"text": "🗑 Borrar", "callback_data": f"ec:{i}|borrar"}],
     ]}
@@ -831,8 +840,8 @@ def manejar_boton(d, cq):
         elif campo == "exactas":
             aplicar_edicion(d, b, "exactas", "")
             menu_alerta(chat, b, msg_id)
-        elif campo == "prioridad":
-            b["prioridad"] = not b.get("prioridad")
+        elif campo in ("prioridad", "solo_chollos"):
+            b[campo] = not b.get(campo)
             guardar(d)
             menu_alerta(chat, b, msg_id)
         elif campo == "pausa":
@@ -1094,6 +1103,7 @@ input[type=range]{width:100%;accent-color:var(--verde)}
 </div>
 <label>No quiero anuncios con estas palabras (separadas por comas)</label>
 <input type="text" id="excluir" placeholder="Ej: juego, funda, roto">
+<label class="check" style="margin-top:14px"><input type="checkbox" id="chollos"> 💰 Solo chollos: avisar solo si está al menos un 10 % por debajo del precio típico</label>
 <label class="check" style="margin-top:14px"><input type="checkbox" id="prioridad"> ⚡ Prioritaria: revisar cada 8 segundos (para lo que más te importa)</label>
 <label class="check" style="margin-top:14px"><input type="checkbox" id="exactas"> 🎯 Palabras exactas: el título debe decir <b>todas</b> las palabras que busco</label>
 <p style="font-size:12px;color:var(--suave);margin:10px 0 0">Busca en Wallapop 🇪🇸🇮🇹 y Vinted en todos los países.</p>
@@ -1150,6 +1160,7 @@ async function cargar(){
   if(b.max!=null)ch.push('hasta '+b.max+' €');
   if(b.exactas)ch.push('🎯 palabras exactas');
   if(b.prioridad)ch.unshift('⚡ prioritaria');
+  if(b.solo_chollos)ch.push('💰 solo chollos');
   (b.excluir||[]).filter(x=>x.trim()).forEach(x=>ch.push('sin '+x.trim()));
   if(b.pausada)ch.unshift('⏸ pausada');
   return `<div class="alerta ${b.pausada?'off':''}"><b>${esc(b.texto)}</b>
@@ -1181,7 +1192,7 @@ async function crear(){
  const mx=$('max').value, mn=$('min').value;
  toast(EDIT?'Guardando…':'Creando alerta…');
  const r=await post(EDIT?'/api/editar':'/api/crear',{id:EDIT,texto,min:mn===''?null:+mn,max:mx===''?null:+mx,
-   exactas:$('exactas').checked,prioridad:$('prioridad').checked,
+   exactas:$('exactas').checked,prioridad:$('prioridad').checked,solo_chollos:$('chollos').checked,
    excluir:$('excluir').value.split(',').map(s=>s.trim()).filter(Boolean)});
  toast(r.msg);
  if(r.ok){cancelarEdicion();await cargar();
@@ -1192,12 +1203,12 @@ function editar(id){
  const b=E.busquedas.find(x=>x.id===id);if(!b)return;
  EDIT=id;
  $('texto').value=b.texto;$('min').value=b.min??'';$('max').value=b.max??'';
- $('excluir').value=(b.excluir||[]).join(', ');$('exactas').checked=!!b.exactas;$('prioridad').checked=!!b.prioridad;
+ $('excluir').value=(b.excluir||[]).join(', ');$('exactas').checked=!!b.exactas;$('prioridad').checked=!!b.prioridad;$('chollos').checked=!!b.solo_chollos;
  $('titForm').textContent='✏️ Editar alerta';$('btnCrear').textContent='Guardar cambios';$('btnCancelar').hidden=false;
  $('titForm').scrollIntoView({behavior:'smooth'});
 }
 function cancelarEdicion(){
- EDIT=null;['texto','min','max','excluir'].forEach(i=>$(i).value='');$('exactas').checked=false;$('prioridad').checked=false;
+ EDIT=null;['texto','min','max','excluir'].forEach(i=>$(i).value='');$('exactas').checked=false;$('prioridad').checked=false;$('chollos').checked=false;
  $('titForm').textContent='➕ Nueva alerta';$('btnCrear').textContent='Crear alerta';$('btnCancelar').hidden=true;
 }
 async function accion(id,a){const r=await post('/api/'+a,{id});toast(r.msg);cargar()}
@@ -1288,7 +1299,7 @@ def crear_panel(d):
                                 "silenciados": len(d["silenciados"]),
                                 "lsil": [{"id": v, "nombre": nombre_vendedor(d, v)} for v in d["silenciados"]],
                                 "paises": [{"dom": x[0], "flag": x[1], "pais": x[2]} for x in VINTED_PAISES],
-                                "busquedas": [dict({k: b.get(k) for k in ("id", "texto", "min", "max", "km", "zona", "lat", "lon", "excluir", "pausada", "fuentes", "exactas", "prioridad")},
+                                "busquedas": [dict({k: b.get(k) for k in ("id", "texto", "min", "max", "km", "zona", "lat", "lon", "excluir", "pausada", "fuentes", "exactas", "prioridad", "solo_chollos")},
                                                    donde=donde_txt(b))
                                               for b in d["busquedas"]]})
                 return
@@ -1353,6 +1364,7 @@ def crear_panel(d):
                      "excluir": [str(x) for x in body.get("excluir") or []],
                      "exactas": bool(body.get("exactas")),
                      "prioridad": bool(body.get("prioridad")),
+                     "solo_chollos": bool(body.get("solo_chollos")),
                      "fuentes": json.loads(json.dumps(FUENTES_DEFECTO))}
                 if ruta == "/api/editar":
                     vieja = alerta()
@@ -1567,6 +1579,48 @@ def bucle(d, solo, cada, hilos, solo_prioritarias=False):
             print(f"Error revisando {solo}:", e)
         time.sleep(max(3, cada() - (time.time() - t0)))
 
+# ---------------- Paquetes de alertas preparados (se crean una sola vez) ----------------
+_SIN_ROTAS = ["roto", "rota", "defectuosa", "defectuoso", "defecto", "averiada", "averiado", "no funciona",
+              "no enciende", "piezas", "despiece", "reparar", "bisagra", "pantalla rota", "juego", "juegos",
+              "funda", "carcasa", "cargador", "protector", "cartucho", "caja vacia", "solo caja"]
+PAQUETES = [
+    ("3dsxl-2026-10-21", "Nintendo 3DS XL (menos de 100 €, sin rotas)", [
+        {"texto": "3ds xl", "exactas": True},
+        {"texto": "3dsxl", "exactas": True},
+        {"texto": "3 ds xl", "exactas": True},
+        {"texto": "3ds ll", "exactas": True},
+        {"texto": "nintendo 3ds grande", "exactas": False},
+    ]),
+]
+
+def aplicar_paquetes(d):
+    hechos = d.setdefault("paquetes", [])
+    for clave, nombre, alertas in PAQUETES:
+        if clave in hechos:
+            continue
+        creadas = []
+        with LOCK:
+            existentes = {_norm(b["texto"]): b for b in d["busquedas"]}
+            for a in alertas:
+                if _norm(a["texto"]) in existentes:      # ya la tenías: solo la hago prioritaria
+                    existentes[_norm(a["texto"])]["prioridad"] = True
+                    continue
+                b = {"texto": a["texto"], "min": 40.0, "max": 100.0, "km": None, "excluir": list(_SIN_ROTAS),
+                     "exactas": a["exactas"], "prioridad": True, "solo_chollos": False,
+                     "fuentes": json.loads(json.dumps(FUENTES_DEFECTO)), "id": d["next_id"],
+                     "vistos": [], "inicial": True}
+                d["next_id"] += 1
+                d["busquedas"].append(b)
+                creadas.append(b)
+            hechos.append(clave)
+        guardar(d)
+        for b in creadas:
+            sembrar(d, b)
+        if d.get("owner") and creadas:
+            enviar(d["owner"], f"📦 <b>Alertas creadas: {html.escape(nombre)}</b>\n"
+                   + "\n".join("• " + describir(b) for b in creadas)
+                   + "\n\nPuedes editarlas o borrarlas en la web o con ✏️ Editar alerta.")
+
 # ---------------- Actualización automática desde GitHub ----------------
 def _version_de(src):
     m = re.search(r'^VERSION = "([^"]+)"', src, re.M)
@@ -1643,6 +1697,8 @@ def main():
     for b in list(d["busquedas"]):
         if b.get("inicial"):
             sembrar(d, b)
+    if d.get("owner"):
+        aplicar_paquetes(d)
     try:
         crear_panel(d)
         print(f"Panel: abre http://localhost:{PUERTO} en Chrome del móvil")
