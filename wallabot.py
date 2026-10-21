@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-1"
+VERSION = "2026.10.21-2"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -379,23 +379,56 @@ VINTED_SES = {}
 VINTED_CAIDOS = {}      # dominio -> hora hasta la que se salta (país que da 404 / no existe)
 VINTED_ESTADO = {}      # dominio -> "ok" / "error 403" / ... (para /estado)
 
+VINTED_UA = ("Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) "
+             "Chrome/134.0.0.0 Mobile Safari/537.36")
+VINTED_LOCALE = {"com": "en-US", "co.uk": "en-GB", "com.au": "en-AU", "at": "de-AT", "be": "fr-BE", "cz": "cs-CZ",
+                 "de": "de-DE", "dk": "da-DK", "ee": "et-EE", "es": "es-ES", "fi": "fi-FI", "fr": "fr-FR",
+                 "gr": "el-GR", "hr": "hr-HR", "hu": "hu-HU", "ie": "en-IE", "it": "it-IT", "lt": "lt-LT",
+                 "lu": "fr-LU", "lv": "lv-LV", "nl": "nl-NL", "pl": "pl-PL", "pt": "pt-PT", "ro": "ro-RO",
+                 "se": "sv-SE", "sk": "sk-SK", "si": "sl-SI"}
+VINTED_FALLOS = {}      # dominio -> fallos seguidos (para esperar más entre intentos)
+
 def _sesion_vinted(dom, nueva=False):
-    """Sesión anónima: la web de Vinted da las cookies access_token_web y anon_id."""
-    s = VINTED_SES.get(dom)
-    if s is None or nueva:
-        s = requests.Session()
-        s.headers.update({"User-Agent": WALLA_HEADERS["User-Agent"], "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"})
-        try:
-            s.head(f"https://www.{dom}/", timeout=20, allow_redirects=True)
-            if not s.cookies.get("access_token_web"):
-                s.get(f"https://www.{dom}/", timeout=20)
-        except Exception as e:
-            print(f"Vinted {dom}: no pude abrir la web ({e})")
-        VINTED_SES[dom] = s
-    return s
+    """Identidad anónima que da la web de Vinted: cookie access_token_web + cabecera X-Anon-Id."""
+    ses = VINTED_SES.get(dom)
+    if ses and not nueva and time.time() - ses["t"] < 1800:
+        return ses
+    loc = VINTED_LOCALE.get(dom.split("vinted.", 1)[1], "en-US")
+    s = requests.Session()
+    r = s.get(f"https://www.{dom}/", timeout=20, headers={
+        "User-Agent": VINTED_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": f"{loc},en;q=0.5", "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1"})
+    m = re.search(r"<html\b[^>]*?\blang=[\"']([A-Za-z]{2}(?:-[A-Za-z0-9]+)?)[\"']", r.text[:20000])
+    ses = {"s": s, "t": time.time(), "loc": m.group(1) if m else loc,
+           "anon": (r.headers.get("X-Anon-Id") or s.cookies.get("anon_id") or "").strip(),
+           "token": s.cookies.get("access_token_web") or ""}
+    VINTED_SES[dom] = ses
+    return ses
 
 def _api_host_vinted(dom):
-    return "api.www.vinted.com" if dom == "vinted.com" else f"api.{dom}"
+    return f"api.{dom}"
+
+def _cabeceras_api(dom, ses):
+    base = f"https://www.{dom}"
+    cab = {"User-Agent": VINTED_UA, "Accept": "application/json, text/plain, */*",
+           "Accept-Language": f"{ses['loc']},en;q=0.5", "Cache-Control": "no-cache", "Pragma": "no-cache",
+           "Origin": base, "Referer": base, "Locale": ses["loc"], "Platform": "web",
+           "X-Next-App": "marketplace-web", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors",
+           "Sec-Fetch-Site": "same-site"}
+    if ses["token"]:
+        cab["Cookie"] = f"access_token_web={ses['token']}"
+    if ses["anon"]:
+        cab["X-Anon-Id"] = ses["anon"]
+    return cab
+
+def _esperar_vinted(dom, minutos_base, motivo):
+    n = VINTED_FALLOS[dom] = VINTED_FALLOS.get(dom, 0) + 1
+    espera = min(60, minutos_base * (2 ** (n - 1)))
+    VINTED_CAIDOS[dom] = time.time() + espera * 60
+    VINTED_ESTADO[dom] = f"{motivo} (reintento en {espera} min)"
+    print(f"Vinted {dom}: {motivo}, lo vuelvo a intentar en {espera} min")
 
 def _items_vinted(data):
     if isinstance(data, list):
@@ -425,35 +458,36 @@ def buscar_vinted(b, dom):
     params = {"search_text": b["texto"], "order": "newest_first", "per_page": 30, "page": 1}
     if b.get("min") is not None: params["price_from"] = b["min"]   # vacíos no: la API da 400
     if b.get("max") is not None: params["price_to"] = b["max"]
-    data, ultimo = None, ""
-    for intento in range(3):
+    data = None
+    for intento in range(2):
         try:
-            s = _sesion_vinted(dom, nueva=intento > 0)
-            token, anon = s.cookies.get("access_token_web"), s.cookies.get("anon_id")
-            cab = {"Accept": "application/json", "Origin": f"https://www.{dom}", "Referer": f"https://www.{dom}/"}
-            if token: cab["Authorization"] = f"Bearer {token}"
-            if anon:  cab["x-anon-id"] = anon
-            r = s.get(f"https://{_api_host_vinted(dom)}/svc-catalogue/items", params=params, headers=cab, timeout=20)
-            if r.status_code == 404:      # por si algún país sigue con la API antigua
-                r = s.get(f"https://www.{dom}/api/v2/catalog/items", params=params,
-                          headers={"Accept": "application/json"}, timeout=20)
-            if r.status_code == 200:
+            ses = _sesion_vinted(dom, nueva=intento > 0)
+            r = ses["s"].get(f"https://{_api_host_vinted(dom)}/svc-catalogue/items", params=params,
+                             headers=_cabeceras_api(dom, ses), timeout=20)
+        except Exception as e:                     # sin conexión / DNS: no insistir enseguida
+            VINTED_SES.pop(dom, None)
+            _esperar_vinted(dom, 2, "sin conexión")
+            return None
+        if r.status_code == 200:
+            try:
                 data = r.json()
-                VINTED_ESTADO[dom] = "ok"
-                break
-            ultimo = f"error {r.status_code}"
-            if r.status_code == 404:
-                VINTED_ESTADO[dom] = ultimo
-                VINTED_CAIDOS[dom] = time.time() + 6 * 3600
-                print(f"Vinted {dom}: no disponible (404), lo salto unas horas")
+            except ValueError:
+                _esperar_vinted(dom, 5, "respuesta rara")
                 return None
-            if r.status_code not in (401, 403):
-                break
-        except Exception as e:
-            ultimo = f"error {type(e).__name__}"
+            VINTED_ESTADO[dom] = "ok"
+            VINTED_FALLOS[dom] = 0
+            break
+        if r.status_code == 401 and intento == 0:   # caducó la identidad: pedir otra
+            continue
+        if r.status_code == 404:
+            _esperar_vinted(dom, 60, "no disponible (404)")
+        elif r.status_code in (403, 429, 503):      # Vinted frena: esperar y bajar el ritmo
+            VINTED_SES.pop(dom, None)
+            _esperar_vinted(dom, 5, f"bloqueo temporal ({r.status_code})")
+        else:
+            _esperar_vinted(dom, 3, f"error {r.status_code}")
+        return None
     if data is None:
-        VINTED_ESTADO[dom] = ultimo or "error"
-        print(f"Vinted {dom}: {ultimo}")
         return None
     lista = _items_vinted(data)
     if lista and not VINTED_ESTADO.get("_avisado") and not any(isinstance(x, dict) and x.get("id") for x in lista[:3]):
@@ -512,7 +546,7 @@ def buscar(b, d):
             alguna_ok = True; grupos.append(r)
     doms = f.get("vinted", [])
     if doms:
-        with ThreadPoolExecutor(max_workers=6) as ex:
+        with ThreadPoolExecutor(max_workers=3) as ex:   # suave: no saturar el móvil ni Vinted
             for r in ex.map(lambda dom: buscar_vinted(b, dom), doms):
                 if r is not None:
                     alguna_ok = True; grupos.append(r)
