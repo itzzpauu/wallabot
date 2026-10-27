@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.27-1"
+VERSION = "2026.10.27-2"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -622,8 +622,8 @@ def bloqueado(it, silenciados=()):
         return True
     if BLOQ["frag"]:
         texto = nombre + " " + _norm((it.get("titulo") or "") + " " + (it.get("desc") or ""))
-        junto = texto.replace(" ", "")
-        if any(f in texto or f.replace(" ", "") in junto for f in BLOQ["frag"]):
+        junto = re.sub(r"[^a-z0-9ñ]", "", texto)
+        if any(f in texto or re.sub(r"[^a-z0-9ñ]", "", f) in junto for f in BLOQ["frag"]):
             return True
     return False
 
