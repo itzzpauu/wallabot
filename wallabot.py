@@ -4,7 +4,7 @@ WallaBot - Alertas de Wallapop en Telegram (uso personal)
 Requisitos: Python 3.8+  y  pip install requests
 Uso:        TOKEN=tu_token python wallabot.py
 """
-VERSION = "2026.10.21-10"
+VERSION = "2026.10.27-1"
 REPO = "itzzpauu/wallabot"
 import os, sys, json, time, html, re, statistics, threading, unicodedata, requests
 from concurrent.futures import ThreadPoolExecutor
@@ -90,6 +90,7 @@ AYUDA = """🎯 <b>WallaBot</b> — alertas de Wallapop al instante
 /pausa · /reanudar — todas
 /estado — qué países de Vinted funcionan
 /silenciados — ver y quitar silenciados
+/bloquear cash converters — bloquear una cadena entera (todas sus tiendas)
 /solonuevos — cortar la avalancha: solo lo nuevo desde ahora (/limpiar para vaciar)
 /intervalo 60 — revisar cada 60 s (mín. 30)
 /ubicacion 28.12 -15.43 — fijar zona (o envíame tu 📍)
@@ -101,7 +102,7 @@ Cada aviso trae botones: <i>Ver anuncio · Pausar alerta · Silenciar vendedor</
 # ---------------- Datos ----------------
 def cargar():
     base = {"owner": None, "lat": 41.3874, "lon": 2.1686, "zona": "Barcelona", "intervalo": 20, "max_edad": 0, "feed": [], "notif_movil": True,
-            "pausa": False, "busquedas": [], "offset": 0, "next_id": 1, "silenciados": []}
+            "pausa": False, "busquedas": [], "offset": 0, "next_id": 1, "silenciados": [], "bloq": []}
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, encoding="utf-8") as f:
             guardado = json.load(f)
@@ -573,6 +574,7 @@ def buscar(b, d, solo=None):
     if not alguna_ok:
         return None
     sil = set(d.get("silenciados", []))
+    actualizar_bloqueos(d)
     res, ids = [], set()
     sin_precio = dict(b, min=None, max=None)
     for g in grupos:
@@ -604,6 +606,27 @@ def contiene_todas(b, it):
         return True
     return buscadas <= _palabras(it.get("titulo", ""))   # solo el título: lo más estricto
 
+BLOQ = {"nombres": set(), "frag": []}   # se rellena desde d antes de cada búsqueda
+
+def actualizar_bloqueos(d):
+    BLOQ["nombres"] = {_norm(n).strip() for n in d.get("silenciados_nombres", {}).values()
+                       if n and not n.startswith("vendedor de ")}
+    BLOQ["frag"] = [f for f in (_norm(x).strip() for x in d.get("bloq", [])) if f]
+
+def bloqueado(it, silenciados=()):
+    """True si el vendedor está silenciado (por cuenta, por nombre o por palabra bloqueada)."""
+    if it.get("vendedor") and it["vendedor"] in silenciados:
+        return True
+    nombre = _norm(it.get("vendedor_nombre") or "").strip()
+    if nombre and nombre in BLOQ["nombres"]:
+        return True
+    if BLOQ["frag"]:
+        texto = nombre + " " + _norm((it.get("titulo") or "") + " " + (it.get("desc") or ""))
+        junto = texto.replace(" ", "")
+        if any(f in texto or f.replace(" ", "") in junto for f in BLOQ["frag"]):
+            return True
+    return False
+
 def filtrar(b, items, silenciados):
     excl = [_norm(w.strip()) for w in b.get("excluir", []) if w.strip()]
     res = []
@@ -613,7 +636,7 @@ def filtrar(b, items, silenciados):
             continue
         if b.get("exactas") and not contiene_todas(b, it):
             continue
-        if it["vendedor"] and it["vendedor"] in silenciados:
+        if bloqueado(it, silenciados):
             continue
         p = it["precio_num"]
         if p is not None:
@@ -787,13 +810,16 @@ def nombre_vendedor(d, vid):
     return d.get("silenciados_nombres", {}).get(vid) or ("vendedor de Vinted" if vid.startswith("v") else "vendedor de Wallapop")
 
 def lista_silenciados(d, chat, msg_id=None):
-    sil = d.get("silenciados", [])
-    if not sil:
-        txt, teclado = "🔇 Vendedores silenciados: ninguno.", {"inline_keyboard": []}
+    sil, bloq = d.get("silenciados", []), d.get("bloq", [])
+    if not sil and not bloq:
+        txt, teclado = ("🔇 Vendedores silenciados: ninguno.\n\nPara bloquear una cadena entera escribe, "
+                        "por ejemplo: /bloquear cash converters"), {"inline_keyboard": []}
     else:
-        txt = f"🔇 Vendedores silenciados ({len(sil)}).\nToca uno para quitarle el silencio:"
-        teclado = {"inline_keyboard": [[{"text": f"🔊 {nombre_vendedor(d, v)}", "callback_data": f"u:{v}"[:64]}]
-                                       for v in sil[-40:]]}
+        txt = (f"🔇 Vendedores silenciados ({len(sil)}) y bloqueos por nombre ({len(bloq)}).\n"
+               "Toca uno para quitarlo:")
+        filas = [[{"text": f"🚫 «{f}» (todas sus cuentas)"[:60], "callback_data": ("ub:" + f)[:64]}] for f in bloq]
+        filas += [[{"text": f"🔊 {nombre_vendedor(d, v)}", "callback_data": f"u:{v}"[:64]}] for v in sil[-40:]]
+        teclado = {"inline_keyboard": filas}
     if msg_id:
         r = tg("editMessageText", chat_id=chat, message_id=msg_id, text=txt, reply_markup=teclado)
         if r.get("ok"):
@@ -821,9 +847,35 @@ def manejar_boton(d, cq):
         nombre = nombre_vendedor(d, valor)
         d.setdefault("silenciados_nombres", {})[valor] = nombre
         tg("answerCallbackQuery", callback_query_id=cq["id"], text=f"🔇 {nombre} silenciado")
+        botones = [[{"text": "↩️ Deshacer", "callback_data": f"u:{valor}"[:64]}]]
+        sugerencia = " ".join(nombre.split()[:2]) if not nombre.startswith("vendedor de ") else ""
+        if sugerencia:
+            botones.insert(0, [{"text": f"🚫 Bloquear todo «{sugerencia}»"[:60],
+                                "callback_data": ("bq:" + sugerencia)[:64]}])
         tg("sendMessage", chat_id=chat, parse_mode="HTML",
-           text=f"🔇 <b>{html.escape(nombre)}</b> silenciado. No te llegará nada más suyo.",
-           reply_markup={"inline_keyboard": [[{"text": "↩️ Deshacer", "callback_data": f"u:{valor}"[:64]}]]})
+           text=f"🔇 <b>{html.escape(nombre)}</b> silenciado. No te llegará nada más de esta cuenta."
+                + (f"\n\nSi es una cadena con varias tiendas (como Cash Converters), pulsa "
+                   f"<b>Bloquear todo «{html.escape(sugerencia)}»</b> para silenciar todas sus cuentas."
+                   if sugerencia else ""),
+           reply_markup={"inline_keyboard": botones})
+        return
+    elif tipo == "bq":
+        frag = valor.strip()
+        if frag and _norm(frag) not in [_norm(x) for x in d.setdefault("bloq", [])]:
+            d["bloq"].append(frag)
+        tg("answerCallbackQuery", callback_query_id=cq["id"], text=f"🚫 Bloqueado «{frag}»")
+        tg("editMessageText", chat_id=chat, message_id=cq["message"]["message_id"], parse_mode="HTML",
+           text=f"🚫 Bloqueado todo lo que contenga <b>«{html.escape(frag)}»</b> (nombre del vendedor o anuncio).",
+           reply_markup={"inline_keyboard": [[{"text": "↩️ Deshacer", "callback_data": ("ub:" + frag)[:64]}]]})
+        return
+    elif tipo == "ub":
+        d["bloq"] = [x for x in d.get("bloq", []) if _norm(x) != _norm(valor)]
+        tg("answerCallbackQuery", callback_query_id=cq["id"], text=f"✅ «{valor}» desbloqueado")
+        if (cq["message"].get("text") or "").startswith("🔇 Vendedores silenciados"):
+            lista_silenciados(d, chat, cq["message"]["message_id"])
+        else:
+            tg("editMessageText", chat_id=chat, message_id=cq["message"]["message_id"], parse_mode="HTML",
+               text=f"✅ «{html.escape(valor)}» ya no está bloqueado.")
         return
     elif tipo == "u":
         if valor in d["silenciados"]:
@@ -991,11 +1043,23 @@ def manejar(d, msg):
     elif cmd == "/silenciados":
         lista_silenciados(d, chat)
 
+    elif cmd == "/bloquear":
+        if not arg:
+            enviar(chat, "Escribe qué nombre bloquear. Ej: <code>/bloquear cash converters</code>"); return
+        if _norm(arg) not in [_norm(x) for x in d.setdefault("bloq", [])]:
+            d["bloq"].append(arg)
+        enviar(chat, f"🚫 Bloqueado todo lo que contenga <b>«{html.escape(arg)}»</b> en el nombre del vendedor o en el anuncio.\n"
+                     "Para quitarlo: /silenciados")
+
+    elif cmd == "/desbloquear":
+        d["bloq"] = [x for x in d.get("bloq", []) if _norm(x) != _norm(arg)]
+        enviar(chat, f"✅ «{html.escape(arg)}» desbloqueado.")
+
     elif cmd == "/solonuevos":
         solo_nuevos(d)
         enviar(chat, "🧹 Avisos pendientes cortados. Desde ahora solo te llegará lo que se publique nuevo.")
     elif cmd == "/limpiar":
-        d["silenciados"] = []; enviar(chat, "Lista de silenciados vaciada.")
+        d["silenciados"] = []; d["silenciados_nombres"] = {}; enviar(chat, "Lista de silenciados vaciada.")
 
     elif cmd == "/intervalo":
         try:
@@ -1149,6 +1213,10 @@ input[type=range]{width:100%;accent-color:var(--verde)}
  <option value="0">Sin límite: todo lo nuevo que detecte (recomendado)</option>
  <option value="5">5 minutos</option><option value="10">10 minutos</option><option value="15">15 minutos</option><option value="30">30 minutos</option><option value="60">1 hora</option>
 </select>
+<label>Bloquear vendedores o cadenas por nombre (todas sus tiendas)</label>
+<div class="fila"><div style="flex:3"><input type="text" id="nbloq" placeholder="Ej: cash converters"></div>
+<div><button class="btn" style="margin:0;padding:12px" onclick="bloquearNombre()">Bloquear</button></div></div>
+<div class="chips" id="lbloq" style="margin-top:8px"></div>
 <label>Vendedores silenciados: <b id="nsil">0</b></label>
 <div class="chips" id="lsil"></div>
 <button class="btn sec" onclick="if(confirm('¿Quitar el silencio a todos?'))post('/api/limpiar').then(cargar)">Quitar silencio a todos</button>
@@ -1196,6 +1264,7 @@ async function cargar(){
  $('notifmovil').checked=!!E.notif_movil;
  $('notifaviso').textContent=E.termux_api?'':'⚠️ Falta instalar Termux:API para que salgan.';
  $('nsil').textContent=E.silenciados;
+ $('lbloq').innerHTML=(E.bloq||[]).map(f=>`<button class="pais" onclick="post('/api/desbloquear',{f:'${esc(f).replace(/'/g,"&#39;")}'}).then(r=>{toast(r.msg);cargar()})">🚫 ${esc(f)} ✕</button>`).join('');
  $('lsil').innerHTML=(E.lsil||[]).map(v=>`<button class="pais" onclick="post('/api/desilenciar',{id:'${esc(v.id)}'}).then(r=>{toast(r.msg);cargar()})">🔊 ${esc(v.nombre)} ✕</button>`).join('');
  $('hora').textContent='Actualizado '+new Date().toLocaleTimeString('es-ES');
  const vSel=$('fAlerta').value;
@@ -1226,6 +1295,10 @@ function editar(id){
 function cancelarEdicion(){
  EDIT=null;['texto','min','max','excluir'].forEach(i=>$(i).value='');$('exactas').checked=false;$('prioridad').checked=false;$('chollos').checked=false;
  $('titForm').textContent='➕ Nueva alerta';$('btnCrear').textContent='Crear alerta';$('btnCancelar').hidden=true;
+}
+async function bloquearNombre(){
+ const f=$('nbloq').value.trim();if(!f){toast('Escribe un nombre');return}
+ const r=await post('/api/bloquear',{f});toast(r.msg);$('nbloq').value='';cargar();
 }
 async function accion(id,a){const r=await post('/api/'+a,{id});toast(r.msg);cargar()}
 async function ajustes(o){const r=await post('/api/ajustes',o);toast(r.msg);cargar()}
@@ -1327,6 +1400,7 @@ def crear_panel(d):
                                 "intervalo": d["intervalo"], "pausa": d["pausa"], "max_edad": d.get("max_edad", 0), "notif_movil": d.get("notif_movil", True),
                                 "termux_api": bool(shutil.which("termux-notification")),
                                 "silenciados": len(d["silenciados"]),
+                                "bloq": list(d.get("bloq", [])),
                                 "lsil": [{"id": v, "nombre": nombre_vendedor(d, v)} for v in d["silenciados"]],
                                 "paises": [{"dom": x[0], "flag": x[1], "pais": x[2]} for x in VINTED_PAISES],
                                 "busquedas": [dict({k: b.get(k) for k in ("id", "texto", "min", "max", "km", "zona", "lat", "lon", "excluir", "pausada", "fuentes", "exactas", "prioridad", "solo_chollos")},
@@ -1483,10 +1557,20 @@ def crear_panel(d):
                 guardar(d)
                 return self._json({"msg": "Guardado ✓"})
 
+            if ruta in ("/api/bloquear", "/api/desbloquear"):
+                f = str(body.get("f") or "").strip()
+                with LOCK:
+                    d["bloq"] = [x for x in d.get("bloq", []) if _norm(x) != _norm(f)]
+                    if ruta == "/api/bloquear" and f:
+                        d["bloq"].append(f)
+                guardar(d)
+                return self._json({"msg": f"🚫 Bloqueado «{f}»" if ruta == "/api/bloquear" else f"✅ «{f}» desbloqueado", "ok": True})
+
             if ruta == "/api/desilenciar":
                 with LOCK:
                     if body.get("id") in d["silenciados"]:
                         d["silenciados"].remove(body["id"])
+                    d.get("silenciados_nombres", {}).pop(body.get("id"), None)
                 guardar(d)
                 return self._json({"msg": "🔊 Silencio quitado", "ok": True})
 
@@ -1497,6 +1581,7 @@ def crear_panel(d):
             if ruta == "/api/limpiar":
                 with LOCK:
                     d["silenciados"] = []
+                    d["silenciados_nombres"] = {}
                 guardar(d)
                 return self._json({"msg": "Silenciados vaciados"})
 
@@ -1552,7 +1637,8 @@ def remitente(d):
         try:
             if t < d.get("corte_ts", 0) or d.get("pausa") or b.get("pausada") or b not in d["busquedas"]:
                 continue
-            if it.get("vendedor") and it["vendedor"] in d["silenciados"]:
+            actualizar_bloqueos(d)
+            if bloqueado(it, set(d["silenciados"])):
                 continue
             enviar_anuncio(d["owner"], it, b)
             notificar_movil(d, it, b)
@@ -1721,6 +1807,7 @@ def main():
         {"command": "probar", "description": "Ver últimos resultados"},
         {"command": "solonuevos", "description": "Cortar avalancha: solo lo nuevo desde ahora"},
         {"command": "silenciados", "description": "Ver y quitar vendedores silenciados"},
+        {"command": "bloquear", "description": "Bloquear una cadena entera (ej. cash converters)"},
         {"command": "intervalo", "description": "Cada cuántos segundos revisar"},
         {"command": "ubicacion", "description": "Fijar zona"},
     ])
